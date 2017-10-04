@@ -15,35 +15,39 @@ val generate = {
 	reflections
 		.getTypesAnnotatedWith(MCElement::class.java)
 		.map(generateParts.partially1(reflections) andThen ::generateType)
-		.forEach(::generateKotlinFile)
+		.forEach(generateKotlinFile)
 }
 
 val generateParts = { reflections: Reflections, type: Class<*> ->
-	Parts("${type.simpleName}Spec", generateConstructor(type), generateFunctions(type, reflections))
+	Parts("${type.simpleName}Spec", generateConstructor(type), generateFunctions(reflections, type))
 }
 
-fun generateConstructor(type: Class<*>) =
+val generateConstructor = { type: Class<*> ->
 	FunSpec
-		.constructorBuilder()
-		.addParameter(type.simpleName.decapitalize(), type)
-		.build()
-
-fun generateFunctions(type: Class<*>, reflections: Reflections): List<FunSpec> {
-	TODO("not implemented") //To change body of created functions use File | Settings | File Templates.
+        .constructorBuilder()
+        .addParameter(type.simpleName.decapitalize(), type)
+        .build()
 }
 
-fun generateType(parts: Parts) =
-	TypeSpec
-		.classBuilder(parts.name)
-		.primaryConstructor(parts.constructor)
-		.build()
+val generateFunctions = { reflections: Reflections, type: Class<*> ->
+    ReflectionUtils
+}
 
-fun generateKotlinFile(type: TypeSpec) =
-	FileSpec.builder("com.predic8.membrane.dsl", type.name as String)
-		.addType(type)
-		.indent(" ".repeat(4))
-		.build()
-		.writeTo(Paths.get("build/generated"))
+val generateType = { parts: Parts ->
+    TypeSpec
+        .classBuilder(parts.name)
+        .primaryConstructor(parts.constructor)
+        .build()
+}
+
+val generateKotlinFile = { type: TypeSpec ->
+    FileSpec
+        .builder("com.predic8.membrane.dsl", type.name as String)
+        .addType(type)
+        .indent(" ".repeat(4))
+        .build()
+        .writeTo(Paths.get("build/generated"))
+}
 
 fun main(args: Array<String>) {
 	generate()
