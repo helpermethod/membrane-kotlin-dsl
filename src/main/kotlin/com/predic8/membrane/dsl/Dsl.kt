@@ -13,70 +13,76 @@ import org.reflections.ReflectionUtils.getAllMethods
 import org.reflections.ReflectionUtils.withAnnotation
 import org.reflections.Reflections
 import org.springframework.beans.factory.annotation.Required
+import java.lang.reflect.Method
 import java.lang.reflect.ParameterizedType
+import java.lang.reflect.Type
 import java.nio.file.Paths
 
 data class Parts(val name: String, val constructor: FunSpec, val functions: List<FunSpec>)
 
-val generate = {
-	val reflections = Reflections()
-
+fun generate(reflections: Reflections = Reflections()) {
 	reflections
 		.getTypesAnnotatedWith(MCElement::class.java)
-		.map(generateParts.partially1(reflections) andThen generateClass)
-		.forEach(writeKotlinFile)
+		.forEach(::generateParts.partially1(reflections) andThen generateClass andThen ::writeKotlinFile)
 }
 
-val generateParts = { reflections: Reflections, type: Class<*> ->
+fun generateParts(reflections: Reflections, type: Class<*>) =
 	Parts("${type.simpleName}Spec", generateConstructor(type), generateFuns(reflections, type))
-}
 
-val generateConstructor = { type: Class<*> ->
+fun generateConstructor(type: Class<*>) =
 	FunSpec
 		.constructorBuilder()
-		.addParameter(type.simpleName.decapitalize(), type)
+		.addParameter(toCamelCase(type.simpleName), type)
 		.build()
-}
 
-val generateFuns = { reflections: Reflections, type: Class<*> ->
-	getAllMethods(type, withAnnotation(MCChildElement::class.java)).flatMap { child ->
-		val parameter = child.parameters.first()
-		val parametrizedType = parameter.parameterizedType
+fun generateFuns(reflections: Reflections, type: Class<*>) =
+	getAllMethods(type, withAnnotation(MCChildElement::class.java))
+		.flatMap({ child: Method -> child.parameters.first().parameterizedType } andThen ::determineParameterType andThen ::generateSubtypeFuns.partially1(reflections))
 
-        when(parametrizedType) {
-			is ParameterizedType -> generateSubtypeFuns(parametrizedType, reflections)
-	        else -> listOf()
-		}
+fun determineParameterType(parametrizedType: Type): Type =
+	when (parametrizedType) {
+		is ParameterizedType -> parametrizedType.actualTypeArguments.first()
+		else -> parametrizedType
+	}
+
+fun generateSubtypeFuns(reflections: Reflections, type: Type): List<FunSpec> {
+	val subTypes = reflections
+		.getSubTypesOf(type as Class<*>)
+		.filter { it.isAnnotationPresent(MCElement::class.java) }
+
+	return when {
+		subTypes.isEmpty() -> listOf(generateFun(type))
+		else -> subTypes.map(::generateFun)
 	}
 }
 
-private fun generateSubtypeFuns(parametrizedType: ParameterizedType, reflections: Reflections): List<FunSpec> {
-	val (parameterType, _) = parametrizedType.actualTypeArguments
-	val subTypes = reflections.getSubTypesOf(parameterType as Class<*>).filter { it.isAnnotationPresent(MCElement::class.java) }
-
-	if (subTypes.isEmpty()) {
-		// TODO
-	}
-
-	return subTypes.map { subType ->
-		generateFun(subType)
-	}
-}
-
-private fun generateFun(subType: Class<*>): FunSpec {
-	val (reqAttributes, _) = subType.methods
+fun generateFun(subType: Class<*>): FunSpec {
+	val (reqAttributes, _) = subType
+		.methods
 		.filter { it.isAnnotationPresent(MCAttribute::class.java) }
 		.partition { it.isAnnotationPresent(Required::class.java) }
 
 	return FunSpec
 		.builder(subType.getAnnotation(MCElement::class.java).name)
-		.addParameters(reqAttributes.map { attribute ->
-			ParameterSpec
-				.builder(attribute.name.removePrefix("set"), attribute.parameters.first().type)
-				.build()
-		})
+		.addParameters(reqAttributes.map(::createParameter))
 		.build()
 }
+
+fun createParameter(attribute: Method) =
+	ParameterSpec
+		.builder(sanitize(attribute.name), attribute.parameters.first().type)
+		.build()
+
+fun toCamelCase(s: String): String {
+	val i = s.indexOfFirst { it in 'a'..'z' }
+
+	return when(i) {
+		1 -> s[0].toLowerCase() + s.substring(1)
+		else -> s.slice(0 until i - 1).toLowerCase() + s.slice(i - 1..s.lastIndex)
+	}
+}
+
+val sanitize = { s: String -> s.removePrefix("set") } andThen { s: String -> s.decapitalize() }
 
 val generateClass = { (name, constructor, functions): Parts ->
 	TypeSpec
@@ -86,14 +92,13 @@ val generateClass = { (name, constructor, functions): Parts ->
 		.build()
 }
 
-val writeKotlinFile = { type: TypeSpec ->
+fun writeKotlinFile(type: TypeSpec) =
 	FileSpec
 		.builder("com.predic8.membrane.dsl", type.name as String)
 		.addType(type)
 		.indent(" ".repeat(4))
 		.build()
 		.writeTo(Paths.get("build/generated"))
-}
 
 fun main(args: Array<String>) {
 	generate()
