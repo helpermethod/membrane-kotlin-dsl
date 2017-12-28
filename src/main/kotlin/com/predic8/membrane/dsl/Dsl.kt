@@ -3,10 +3,13 @@ package com.predic8.membrane.dsl
 import com.predic8.membrane.annot.MCAttribute
 import com.predic8.membrane.annot.MCChildElement
 import com.predic8.membrane.annot.MCElement
+import com.squareup.kotlinpoet.ClassName
 import com.squareup.kotlinpoet.FileSpec
 import com.squareup.kotlinpoet.FunSpec
+import com.squareup.kotlinpoet.LambdaTypeName
 import com.squareup.kotlinpoet.ParameterSpec
 import com.squareup.kotlinpoet.TypeSpec
+import com.squareup.kotlinpoet.asTypeName
 import org.funktionale.composition.andThen
 import org.funktionale.partials.partially1
 import org.reflections.ReflectionUtils.getAllMethods
@@ -19,6 +22,7 @@ import java.lang.reflect.Type
 import java.nio.file.Paths
 
 data class Parts(val name: String, val constructor: FunSpec, val functions: List<FunSpec>)
+data class Attribute(val methodName: String, val parameter: ParameterSpec)
 
 fun generate(reflections: Reflections = Reflections()) {
 	reflections
@@ -26,13 +30,18 @@ fun generate(reflections: Reflections = Reflections()) {
 		.forEach(::generateParts.partially1(reflections) andThen generateClass andThen ::writeKotlinFile)
 }
 
-fun generateParts(reflections: Reflections, type: Class<*>) =
-	Parts("${type.simpleName}Spec", generateConstructor(type), generateFuns(reflections, type))
+fun generateParts(reflections: Reflections, type: Class<*>): Parts {
+	val field = ParameterSpec
+		.builder(type.simpleName.toCamelCase(), type)
+		.build()
 
-fun generateConstructor(type: Class<*>) =
+	return Parts("${type.simpleName}Spec", generateConstructor(field), generateFuns(reflections, type))
+}
+
+fun generateConstructor(parameter: ParameterSpec) =
 	FunSpec
 		.constructorBuilder()
-		.addParameter(toCamelCase(type.simpleName), type)
+		.addParameter(parameter)
 		.build()
 
 fun generateFuns(reflections: Reflections, type: Class<*>) =
@@ -50,35 +59,54 @@ fun generateSubtypeFuns(reflections: Reflections, type: Type): List<FunSpec> {
 		.getSubTypesOf(type as Class<*>)
 		.filter { it.isAnnotationPresent(MCElement::class.java) }
 
-	return when {
-		subTypes.isEmpty() -> listOf(generateFun(type))
-		else -> subTypes.map(::generateFun)
-	}
+	return if (subTypes.isEmpty()) listOf(generateFun(type)) else subTypes.map(::generateFun)
 }
 
 fun generateFun(subType: Class<*>): FunSpec {
-	val (reqAttributes, _) = subType
+	val (reqAttributes, optAttributes) = subType
 		.methods
 		.filter { it.isAnnotationPresent(MCAttribute::class.java) }
 		.partition { it.isAnnotationPresent(Required::class.java) }
 
-	return FunSpec
-		.builder(subType.getAnnotation(MCElement::class.java).name)
-		.addParameters(reqAttributes.map(::createParameter))
+	val attrs = reqAttributes.map { Attribute(it.name, createParameter(subType, it.name, it.parameters.first().type)) } +
+                optAttributes.map { Attribute(it.name, createParameter(subType, it.name, it.parameters.first().type, defaultValue = true)) }
+
+	return with(FunSpec.builder(subType.getAnnotation(MCElement::class.java).name)) {
+		addParameters(attrs.map { it.parameter })
+		addParameter("init", LambdaTypeName.get(receiver = ClassName("com.predic8.membrane.dsl", "${subType.simpleName}Spec"), returnType = Unit::class.asTypeName()))
+		addStatement("val %N = %T()", subType.simpleName.decapitalize(), subType)
+		attrs.forEach {
+			addStatement("%N.%N(%N)", subType.simpleName.decapitalize(), it.methodName, it.parameter)
+		}
+		addStatement("%NSpec(type).init()", subType.simpleName)
+		build()
+	}
+}
+
+fun createParameter(type: Type, name: String, parameterType: Type, defaultValue: Boolean = false): ParameterSpec {
+	val propertyName = sanitize(name)
+
+	return ParameterSpec
+		.builder(propertyName, parameterType)
+		.apply {
+			println("type: $type, propertyName: $propertyName")
+			if (defaultValue) {
+				defaultValue("%L", (type as Class<*>)
+					.getDeclaredField(propertyName)
+					.apply { isAccessible = true }
+					.get(type.newInstance()))
+			}
+		}
 		.build()
 }
 
-fun createParameter(attribute: Method) =
-	ParameterSpec
-		.builder(sanitize(attribute.name), attribute.parameters.first().type)
-		.build()
+// TODO tailrec
+fun String.toCamelCase(): String {
+	val indexOfLastConsecutiveUppercaseLetter = this.indexOfFirst { it in 'a'..'z' } - 1
 
-fun toCamelCase(s: String): String {
-	val i = s.indexOfFirst { it in 'a'..'z' }
-
-	return when(i) {
-		1 -> s[0].toLowerCase() + s.substring(1)
-		else -> s.slice(0 until i - 1).toLowerCase() + s.slice(i - 1..s.lastIndex)
+	return when (indexOfLastConsecutiveUppercaseLetter) {
+		0 -> this.decapitalize()
+		else -> this.slice(0 until indexOfLastConsecutiveUppercaseLetter).toLowerCase() + this.slice(indexOfLastConsecutiveUppercaseLetter..this.lastIndex)
 	}
 }
 

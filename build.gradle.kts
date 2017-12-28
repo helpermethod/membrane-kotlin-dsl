@@ -11,8 +11,10 @@ java {
 			withConvention(KotlinSourceSet::class) {
 				kotlin.srcDir("build/generated")
 
-				compileClasspath += sourceSets["main"].output
-				runtimeClasspath += sourceSets["main"].output
+				val main by sourceSets
+
+				compileClasspath += main.output
+				runtimeClasspath += main.output
 			}
 		}
 	}
@@ -31,12 +33,14 @@ dependencies {
 	compile(kotlin("stdlib"))
 	compile("org.reflections:reflections:0.9.11")
 	compile("org.membrane-soa:service-proxy-core:4.5.0")
-	compile("com.squareup:kotlinpoet:0.6.0")
+	compile("com.squareup:kotlinpoet:0.7.0-SNAPSHOT")
 	compile("org.funktionale:funktionale-all:1.1")
+	testCompile("io.kotlintest:kotlintest:2.0.7")
 }
 
 repositories {
 	jcenter()
+	mavenLocal()
 }
 
 application {
