@@ -1,5 +1,6 @@
 package com.predic8.membrane.dsl
 
+import com.google.common.base.Predicates.or
 import com.predic8.membrane.annot.MCAttribute
 import com.predic8.membrane.annot.MCChildElement
 import com.predic8.membrane.annot.MCElement
@@ -14,6 +15,7 @@ import org.funktionale.composition.andThen
 import org.funktionale.partials.partially1
 import org.reflections.ReflectionUtils.getAllMethods
 import org.reflections.ReflectionUtils.withAnnotation
+import org.reflections.ReflectionUtils.withName
 import org.reflections.Reflections
 import org.springframework.beans.factory.annotation.Required
 import java.lang.reflect.Method
@@ -22,7 +24,6 @@ import java.lang.reflect.Type
 import java.nio.file.Paths
 
 data class Parts(val name: String, val constructor: FunSpec, val functions: List<FunSpec>)
-data class Attribute(val methodName: String, val parameter: ParameterSpec)
 
 fun generate(reflections: Reflections = Reflections()) {
 	reflections
@@ -68,39 +69,31 @@ fun generateFun(subType: Class<*>): FunSpec {
 		.filter { it.isAnnotationPresent(MCAttribute::class.java) }
 		.partition { it.isAnnotationPresent(Required::class.java) }
 
-	val attrs = reqAttributes.map { Attribute(it.name, createParameter(subType, it.name, it.parameters.first().type)) } +
-                optAttributes.map { Attribute(it.name, createParameter(subType, it.name, it.parameters.first().type, defaultValue = true)) }
+	val attrs = reqAttributes.map { it.name to createParameter(subType, it.name, it.parameters.first().type) } +
+		optAttributes.map { it.name to createParameter(subType, it.name, it.parameters.first().type, defaultValue = true) }
 
 	return with(FunSpec.builder(subType.getAnnotation(MCElement::class.java).name)) {
-		addParameters(attrs.map { it.parameter })
+		addParameters(attrs.map { (_, parameter) -> parameter })
 		addParameter("init", LambdaTypeName.get(receiver = ClassName("com.predic8.membrane.dsl", "${subType.simpleName}Spec"), returnType = Unit::class.asTypeName()))
 		addStatement("val %N = %T()", subType.simpleName.decapitalize(), subType)
-		attrs.forEach {
-			addStatement("%N.%N(%N)", subType.simpleName.decapitalize(), it.methodName, it.parameter)
+		attrs.forEach { (methodName, parameter) ->
+			addStatement("%N.%N(%N)", subType.simpleName.decapitalize(), methodName, parameter)
 		}
-		addStatement("%NSpec(type).init()", subType.simpleName)
+		addStatement("%NSpec(%N).init()", subType.simpleName, subType.simpleName.decapitalize())
 		build()
 	}
 }
 
-fun createParameter(type: Type, name: String, parameterType: Type, defaultValue: Boolean = false): ParameterSpec {
-	val propertyName = sanitize(name)
-
-	return ParameterSpec
-		.builder(propertyName, parameterType)
+fun createParameter(type: Type, name: String, parameterType: Type, defaultValue: Boolean = false) =
+	ParameterSpec
+		.builder(sanitize(name), parameterType)
 		.apply {
-			println("type: $type, propertyName: $propertyName")
 			if (defaultValue) {
-				defaultValue("%L", (type as Class<*>)
-					.getDeclaredField(propertyName)
-					.apply { isAccessible = true }
-					.get(type.newInstance()))
+				defaultValue("%L", null)
 			}
 		}
 		.build()
-}
 
-// TODO tailrec
 fun String.toCamelCase(): String {
 	val indexOfLastConsecutiveUppercaseLetter = this.indexOfFirst { it in 'a'..'z' } - 1
 
