@@ -56,6 +56,10 @@ task<Jar>("jarGenerated") {
 	from(directories + jars.map(project::zipTree))
 }
 
+task<Wrapper>("wrapper") {
+	gradleVersion = "4.4"
+}
+
 tasks["compileGeneratedKotlin"].dependsOn("run")
 
 defaultTasks("jarGenerated")
