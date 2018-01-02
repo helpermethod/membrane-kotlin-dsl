@@ -1,18 +1,22 @@
 package com.predic8.membrane.dsl
 
-import com.google.common.base.Predicates.or
 import com.predic8.membrane.annot.MCAttribute
 import com.predic8.membrane.annot.MCChildElement
 import com.predic8.membrane.annot.MCElement
 import com.squareup.kotlinpoet.ClassName
 import com.squareup.kotlinpoet.FileSpec
 import com.squareup.kotlinpoet.FunSpec
+import com.squareup.kotlinpoet.KModifier
 import com.squareup.kotlinpoet.LambdaTypeName
 import com.squareup.kotlinpoet.ParameterSpec
+import com.squareup.kotlinpoet.TypeName
 import com.squareup.kotlinpoet.TypeSpec
 import com.squareup.kotlinpoet.asTypeName
 import org.funktionale.composition.andThen
-import org.funktionale.partials.partially1
+import org.funktionale.either.Either
+import org.funktionale.either.eitherTry
+import org.funktionale.partials.invoke
+import org.funktionale.utils.identity
 import org.reflections.ReflectionUtils.getAllMethods
 import org.reflections.ReflectionUtils.withAnnotation
 import org.reflections.ReflectionUtils.withName
@@ -28,7 +32,7 @@ data class Parts(val name: String, val constructor: FunSpec, val functions: List
 fun generate(reflections: Reflections = Reflections()) {
 	reflections
 		.getTypesAnnotatedWith(MCElement::class.java)
-		.forEach(::generateParts.partially1(reflections) andThen generateClass andThen ::writeKotlinFile)
+		.forEach((::generateParts)(p1 = reflections) andThen generateClass andThen ::writeKotlinFile)
 }
 
 fun generateParts(reflections: Reflections, type: Class<*>): Parts {
@@ -47,7 +51,7 @@ fun generateConstructor(parameter: ParameterSpec) =
 
 fun generateFuns(reflections: Reflections, type: Class<*>) =
 	getAllMethods(type, withAnnotation(MCChildElement::class.java))
-		.flatMap({ child: Method -> child.parameters.first().parameterizedType } andThen ::determineParameterType andThen ::generateSubtypeFuns.partially1(reflections))
+		.flatMap({ child: Method -> child.parameters.first().parameterizedType } andThen ::determineParameterType andThen (::generateSubtypeFuns)(p1 = reflections))
 
 fun determineParameterType(parametrizedType: Type): Type =
 	when (parametrizedType) {
@@ -69,8 +73,8 @@ fun generateFun(subType: Class<*>): FunSpec {
 		.filter { it.isAnnotationPresent(MCAttribute::class.java) }
 		.partition { it.isAnnotationPresent(Required::class.java) }
 
-	val attrs = reqAttributes.map { it.name to createParameter(subType, it.name, it.parameters.first().type) } +
-		optAttributes.map { it.name to createParameter(subType, it.name, it.parameters.first().type, defaultValue = true) }
+	val attrs = reqAttributes.map { it.name to generateParameter(subType, it.name, it.parameters.first().type) } +
+		optAttributes.map { it.name to generateParameter(subType, it.name, it.parameters.first().type, defaultValue = true) }
 
 	return with(FunSpec.builder(subType.getAnnotation(MCElement::class.java).name)) {
 		addParameters(attrs.map { (_, parameter) -> parameter })
@@ -84,15 +88,33 @@ fun generateFun(subType: Class<*>): FunSpec {
 	}
 }
 
-fun createParameter(type: Type, name: String, parameterType: Type, defaultValue: Boolean = false) =
+fun generateParameter(type: Type, name: String, parameterType: Type, defaultValue: Boolean = false) =
 	ParameterSpec
-		.builder(sanitize(name), parameterType)
+		.builder(sanitize(name), (parameterType.asTypeName() as ClassName).toKotlinType().asNullable())
 		.apply {
 			if (defaultValue) {
-				defaultValue("%L", null)
+				defaultValue("%L", invokeGetter(type, name))
 			}
 		}
 		.build()
+
+fun ClassName.toKotlinType(): ClassName = when (packageName()) {
+	"java.lang" -> when (simpleName()) {
+		"String" -> ClassName("kotlin", "String")
+		else -> this
+	}
+	else -> this
+}
+
+fun invokeGetter(type: Type, name: String) =
+	tryInvokeGetter(type, name).fold({ _ -> null }, { v -> v })
+
+fun tryInvokeGetter(type: Type, name: String) =
+	eitherTry {
+		getAllMethods(type as Class<*>, withName("get${name.removePrefix("set")}"))
+			.first()
+			.invoke(type.newInstance())
+	}
 
 fun String.toCamelCase(): String {
 	val indexOfLastConsecutiveUppercaseLetter = this.indexOfFirst { it in 'a'..'z' } - 1
@@ -103,7 +125,7 @@ fun String.toCamelCase(): String {
 	}
 }
 
-val sanitize = { s: String -> s.removePrefix("set") } andThen { s: String -> s.decapitalize() }
+fun sanitize(s: String) = s.removePrefix("set").decapitalize()
 
 val generateClass = { (name, constructor, functions): Parts ->
 	TypeSpec
