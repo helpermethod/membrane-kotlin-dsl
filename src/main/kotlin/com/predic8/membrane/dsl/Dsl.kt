@@ -3,12 +3,14 @@ package com.predic8.membrane.dsl
 import com.predic8.membrane.annot.MCAttribute
 import com.predic8.membrane.annot.MCChildElement
 import com.predic8.membrane.annot.MCElement
+import com.predic8.membrane.annot.MCTextContent
 import com.squareup.kotlinpoet.ClassName
 import com.squareup.kotlinpoet.FileSpec
 import com.squareup.kotlinpoet.FunSpec
 import com.squareup.kotlinpoet.LambdaTypeName
 import com.squareup.kotlinpoet.ParameterSpec
 import com.squareup.kotlinpoet.PropertySpec
+import com.squareup.kotlinpoet.TypeName
 import com.squareup.kotlinpoet.TypeSpec
 import com.squareup.kotlinpoet.asTypeName
 import org.funktionale.composition.andThen
@@ -25,19 +27,28 @@ import java.lang.reflect.Type
 import java.nio.file.Paths
 
 data class Parts(val name: String, val constructor: FunSpec, val property: PropertySpec, val functions: List<FunSpec>)
+data class TypeDesc(val pattern: String, val methodName: String, val type: Type)
 
 fun generate(reflections: Reflections = Reflections()) {
 	reflections
 		.getTypesAnnotatedWith(MCElement::class.java)
-		.forEach((::generateParts)(p1 = reflections) andThen generateClass andThen ::writeKotlinFile)
+		.forEach((::generateParts)(reflections) andThen generateClass andThen ::writeKotlinFile)
 }
 
-fun generateParts(reflections: Reflections, type: Class<*>) =
-	Parts("${type.simpleName}Spec", generateFullConstructor(type), generateProperty(type), generateFuns(reflections, type))
+fun generateParts(reflections: Reflections, type: Class<*>): Parts {
+	val field = generateField(type)
 
-fun generateProperty(type: Class<*>) =
-	PropertySpec.builder(type.simpleName.toCamelCase(), type)
-		.initializer(type.simpleName.toCamelCase())
+	return Parts(
+		"${type.simpleName}Spec",
+		generateConstructor(field),
+		generateProperty(field.name, field.type),
+		generateFuns(reflections, type, field)
+	)
+}
+
+fun generateProperty(name: String, type: TypeName) =
+	PropertySpec.builder(name, type)
+		.initializer(name)
 		.build()
 
 fun generateField(type: Class<*>) =
@@ -51,77 +62,93 @@ fun generateConstructor(parameter: ParameterSpec) =
 		.addParameter(parameter)
 		.build()
 
-val generateFullConstructor = ::generateField andThen ::generateConstructor
-
-fun generateFuns(reflections: Reflections, type: Class<*>) =
+fun generateFuns(reflections: Reflections, type: Class<*>, field: ParameterSpec) =
 	getAllMethods(type, withAnnotation(MCChildElement::class.java))
-		.flatMap({ child: Method -> child.parameters.first().parameterizedType } andThen ::determineParameterType andThen (::generateSubtypeFuns)(p1 = reflections))
+		.flatMap(::determineParameterDesc andThen (::generateSubtypeFuns)(reflections)(field))
 
-fun determineParameterType(parametrizedType: Type): Type =
-	when (parametrizedType) {
-		is ParameterizedType -> parametrizedType.actualTypeArguments.first()
-		else -> parametrizedType
+fun determineParameterDesc(method: Method): TypeDesc {
+	val parameterizedType = method.parameters.first().parameterizedType
+
+	return when (parameterizedType) {
+		is ParameterizedType -> TypeDesc("%N.%N.add(%N)", method.name, parameterizedType.actualTypeArguments.first())
+		else -> TypeDesc("%N.%N = %N", method.name, parameterizedType)
 	}
+}
 
-fun generateSubtypeFuns(reflections: Reflections, type: Type): List<FunSpec> {
+fun generateSubtypeFuns(reflections: Reflections, field: ParameterSpec, typeDesc: TypeDesc): List<FunSpec> {
+	val (pattern, methodName, type) = typeDesc
 	val subTypes = reflections
 		.getSubTypesOf(type as Class<*>)
 		.filter { it.isAnnotationPresent(MCElement::class.java) }
 
-	return if (subTypes.isEmpty()) listOf(generateFun(type)) else subTypes.map(::generateFun)
+	return if (subTypes.isEmpty()) listOf(generateFun(field, methodName, pattern, type)) else subTypes.map((::generateFun)(field)(methodName)(pattern))
 }
 
-fun generateFun(subType: Class<*>): FunSpec {
-	val attrs = generateAttrs(subType)
-	val subTypeName = subType.simpleName.decapitalize()
+fun generateFun(field: ParameterSpec, methodName: String, pattern: String, type: Type): FunSpec {
+	val attrs = generateAttrs(type as Class<*>)
+	val subTypeName = type.simpleName.decapitalize()
 
-	return with(FunSpec.builder(subType.getAnnotation(MCElement::class.java).name)) {
+	return FunSpec.builder(type.getAnnotation(MCElement::class.java).name).run {
 		addParameters(attrs)
-		addParameter("init", LambdaTypeName.get(receiver = ClassName("com.predic8.membrane.dsl", "${subType.simpleName}Spec"), returnType = Unit::class.asTypeName()))
-		addStatement("val %N = %T()", subTypeName, subType)
+		val hasChildren = type.methods.any { it.isAnnotationPresent(MCChildElement::class.java) }
+		if (hasChildren) {
+			addParameter("init", LambdaTypeName.get(receiver = ClassName("com.predic8.membrane.dsl", "${type.simpleName}Spec"), returnType = Unit::class.asTypeName()))
+		}
+		if (type.methods.any { it.isAnnotationPresent(MCChildElement::class.java) }) {
+			addParameter("init", LambdaTypeName.get(receiver = ClassName("com.predic8.membrane.dsl", "${type.simpleName}Spec"), returnType = Unit::class.asTypeName()))
+		}
+		addStatement("val %N = %T()", subTypeName, type)
 		attrs.forEach {
 			addStatement("%N.%N = %N", subTypeName, it.name, it)
 		}
-		addStatement("%NSpec(%N).init()", subType.simpleName, subTypeName)
+		addStatement("%NSpec(%N).init()", type.simpleName, subTypeName)
+		// pattern, methodname
+		addStatement(pattern, field, methodName.removePrefix("set").decapitalize(), subTypeName)
 		build()
 	}
 }
 
-private fun generateAttrs(subType: Class<*>): List<ParameterSpec> {
+fun generateAttrs(subType: Class<*>): List<ParameterSpec> {
 	val (reqAttributes, optAttributes) = subType
 		.methods
 		.filter { it.isAnnotationPresent(MCAttribute::class.java) }
 		.partition { it.isAnnotationPresent(Required::class.java) }
+	val textContents = subType
+		.methods
+		.filter { it.isAnnotationPresent(MCTextContent::class.java) }
 
-	return reqAttributes.map { generateParameter(subType, it.name, it.parameters.first().type) } +
+	return (reqAttributes + textContents).map { generateParameter(subType, it.name, it.parameters.first().type) } +
 		optAttributes.map { generateParameter(subType, it.name, it.parameters.first().type, defaultValue = true) }
 }
 
 fun generateParameter(type: Type, name: String, parameterType: Type, defaultValue: Boolean = false): ParameterSpec {
-	// is or get
-	val getterName = "${determinePrefix(type.asClassName())}${name.removePrefix("set")}"
+	val getterName = "${determinePrefix((parameterType as Class<*>).simpleName)}${name.removePrefix("set")}"
+	val propertyName = getterName.removePrefix("get").decapitalize()
+	val default = invokeGetter(type, getterName)
 
 	return ParameterSpec
-		// TODO propertyName
-		.builder(getterName.removePrefix("get").decapitalize(), convertType(parameterType))
+		.builder(propertyName, convertType(parameterType))
 		.apply {
 			if (defaultValue) {
-				// TODO when (type) is Boolean
-				defaultValue("%L", invokeGetter(type, getterName))
+				val placeholder = when (default) {
+					is Boolean, is Int, is Long -> "%L"
+					else -> "%S"
+				}
+				defaultValue(placeholder, default)
 			}
 		}
 		.build()
 }
 
-fun determinePrefix(type: ClassName) =
-	when (type.simpleName()) {
+fun determinePrefix(simpleName: String) =
+	when (simpleName) {
 		"boolean" -> "is"
 		else -> "get"
 	}
 
-fun Type.asClassName() = asTypeName() as ClassName
-
 val convertType = Type::asClassName andThen ::convertToKotlinType
+
+fun Type.asClassName() = asTypeName() as ClassName
 
 fun convertToKotlinType(className: ClassName): ClassName =
 	when (className.simpleName()) {
