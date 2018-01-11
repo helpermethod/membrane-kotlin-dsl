@@ -16,7 +16,8 @@ import com.squareup.kotlinpoet.asTypeName
 import org.funktionale.composition.andThen
 import org.funktionale.either.eitherTry
 import org.funktionale.partials.invoke
-import org.reflections.ReflectionUtils.*
+import org.reflections.ReflectionUtils.getAllMethods
+import org.reflections.ReflectionUtils.withAnnotation
 import org.reflections.Reflections
 import org.springframework.beans.factory.annotation.Required
 import java.lang.reflect.Method
@@ -99,7 +100,7 @@ fun generateFun(field: ParameterSpec, methodName: String, pattern: String, type:
 					.build()
 			)
 		}
-		beginControlFlow("val %N = %T().apply", subTypeName, type)
+		beginControlFlow("val %N = %T()%L", subTypeName, type, if (attrs.size != 0) ".apply {" else "")
 		attrs.forEach { (methodName, parameter) ->
 			addStatement("%N(%N)", methodName, parameter)
 		}
