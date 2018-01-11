@@ -40,8 +40,7 @@ dependencies {
 
 repositories {
 	jcenter()
-	// maven("https://oss.sonatype.org/content/repositories/snapshots")
-	mavenLocal()
+	maven("https://oss.sonatype.org/content/repositories/snapshots")
 }
 
 application {
